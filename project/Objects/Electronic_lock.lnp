@@ -1,0 +1,4 @@
+".\Objects\STARTUP.obj",
+".\Objects\main.obj" 
+TO ".\Objects\Electronic_lock" 
+PRINT(".\Listings\Electronic_lock.m51")

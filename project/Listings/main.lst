@@ -1,0 +1,768 @@
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 1   
+
+
+C51 COMPILER V9.60.7.0, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\Objects\main.obj
+COMPILER INVOKED BY: E:\software\Keil\MDK\install\Core\C51\BIN\C51.EXE ..\user\main.c OPTIMIZE(8,SPEED) BROWSE INCDIR(..
+                    -\boards;..\utils) DEBUG OBJECTEXTEND PRINT(.\Listings\main.lst) OBJECT(.\Objects\main.obj)
+
+line level    source
+
+   1          #include <reg51.h>
+   2          #include <intrins.h>
+   3          
+   4          #define uchar unsigned char
+   5          #define uint  unsigned int
+   6          
+   7          // LCD引脚连接
+   8          sbit LCD_RS = P2^0;
+   9          sbit LCD_RW = P2^1;
+  10          sbit LCD_E  = P2^2;
+  11          
+  12          // 输出控制引脚
+  13          sbit GREEN_LED = P2^3;   // 绿灯（低电平点亮）
+  14          sbit RELAY = P2^4;   // 继电器控制（高电平吸合开锁，低电平断开上锁）
+  15          sbit RED_LED = P2^5;   // 红灯（低电平点亮）
+  16          
+  17          // 24C02 I2C引脚（备用）
+  18          sbit SCK = P2^6;
+  19          sbit SDA = P2^7;
+  20          
+  21          // 键盘引脚定义（4x4矩阵键盘）
+  22          // 行线（输出）
+  23          sbit ROW1 = P1^7;   // 行1 - 键: 7,8,9,/
+  24          sbit ROW2 = P1^6;   // 行2 - 键: 4,5,6,C(X)
+  25          sbit ROW3 = P1^5;   // 行3 - 键: 1,2,3,B(-)
+  26          sbit ROW4 = P1^4;   // 行4 - 键: ON/C,0,=,A(+)
+  27          
+  28          // 列线（输入）
+  29          sbit COL1 = P1^0;   // 列1
+  30          sbit COL2 = P1^1;   // 列2
+  31          sbit COL3 = P1^2;   // 列3
+  32          sbit COL4 = P1^3;   // 列4
+  33          
+  34          // 按键值定义
+  35          #define KEY_CONFIRM  10   // C键(X) - 确认
+  36          #define KEY_CLOSE    11   // B键(-) - 关闭/复位
+  37          #define KEY_MODIFY   13   // A键(+) - 修改密码
+  38          #define KEY_CLEAR    14   // ON/C键 - 清除
+  39          
+  40          // 三个用户的密码（初始：0001, 0002, 0003）
+  41          uchar code init_pwd[3][4] = {
+  42              {0, 0, 0, 1},  // 用户1
+  43              {0, 0, 0, 2},  // 用户2
+  44              {0, 0, 0, 3}   // 用户3
+  45          };
+  46          
+  47          uchar pwd_store[3][4];  // 存储三个用户的密码
+  48          uchar current_user;      // 当前验证的用户
+  49          
+  50          uchar input_buf[4];
+  51          uchar input_cnt = 0;
+  52          uchar err_cnt = 0;
+  53          bit lock_flag = 0;
+  54          bit modify_flag = 0;
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 2   
+
+  55          uchar modify_user;       // 要修改密码的用户
+  56          uchar old_pwd[4];
+  57          uchar new_pwd[4];
+  58          uchar modify_step = 0;
+  59          
+  60          // 延时函数
+  61          void delay_us(uint us)
+  62          {
+  63   1          while(us--)
+  64   1          {
+  65   2              _nop_();
+  66   2          }
+  67   1      }
+  68          
+  69          void delay_ms(uint ms)
+  70          {
+  71   1          uint i, j;
+  72   1          for(i = 0; i < ms; i++)
+  73   1              for(j = 0; j < 120; j++);
+  74   1      }
+  75          
+  76          // LCD写指令
+  77          void LCD_Cmd(uchar cmd)
+  78          {
+  79   1          LCD_RS = 0;
+  80   1          LCD_RW = 0;
+  81   1          P0 = cmd;
+  82   1          delay_us(10);
+  83   1          LCD_E = 1;
+  84   1          delay_us(10);
+  85   1          LCD_E = 0;
+  86   1          delay_ms(2);
+  87   1      }
+  88          
+  89          // LCD写数据
+  90          void LCD_Data(uchar dat)
+  91          {
+  92   1          LCD_RS = 1;
+  93   1          LCD_RW = 0;
+  94   1          P0 = dat;
+  95   1          delay_us(10);
+  96   1          LCD_E = 1;
+  97   1          delay_us(10);
+  98   1          LCD_E = 0;
+  99   1          delay_ms(2);
+ 100   1      }
+ 101          
+ 102          // LCD初始化
+ 103          void LCD_Init()
+ 104          {
+ 105   1          delay_ms(15);
+ 106   1          LCD_Cmd(0x38);
+ 107   1          delay_ms(5);
+ 108   1          LCD_Cmd(0x0C);
+ 109   1          delay_ms(5);
+ 110   1          LCD_Cmd(0x06);
+ 111   1          delay_ms(5);
+ 112   1          LCD_Cmd(0x01);
+ 113   1          delay_ms(5);
+ 114   1      }
+ 115          
+ 116          // 显示字符串
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 3   
+
+ 117          void LCD_Show(uchar x, uchar y, uchar *str)
+ 118          {
+ 119   1          uchar addr;
+ 120   1          if(y == 0) 
+ 121   1              addr = 0x80 + x;
+ 122   1          else     
+ 123   1              addr = 0xC0 + x;
+ 124   1          LCD_Cmd(addr);
+ 125   1          while(*str)
+ 126   1          {
+ 127   2              LCD_Data(*str++);
+ 128   2          }
+ 129   1      }
+ 130          
+ 131          // 清屏
+ 132          void LCD_Clear()
+ 133          {
+ 134   1          LCD_Cmd(0x01);
+ 135   1          delay_ms(2);
+ 136   1      }
+ 137          
+ 138          // 显示输入的密码（直接显示数字）
+ 139          void LCD_ShowInput(uchar x, uchar y, uchar *buf, uchar cnt)
+ 140          {
+ 141   1          uchar i;
+ 142   1          uchar addr;
+ 143   1          if(y == 0) 
+ 144   1              addr = 0x80 + x;
+ 145   1          else     
+ 146   1              addr = 0xC0 + x;
+ 147   1          LCD_Cmd(addr);
+ 148   1          for(i = 0; i < cnt; i++)
+ 149   1          {
+ 150   2              LCD_Data(buf[i] + '0');
+ 151   2          }
+ 152   1          // 补齐空位
+ 153   1          for(i = cnt; i < 4; i++)
+ 154   1          {
+ 155   2              LCD_Data(' ');
+ 156   2          }
+ 157   1      }
+ 158          // 键盘扫描函数（改进防抖）
+ 159          uchar KeyScan()
+ 160          {
+ 161   1          uchar key_value = 0xFF;
+ 162   1          
+ 163   1          // 扫描第1行 (P1.7) - 键位: 7,8,9,/
+ 164   1          ROW1 = 0; ROW2 = 1; ROW3 = 1; ROW4 = 1;
+ 165   1          delay_us(50);
+ 166   1          if(COL1 == 0) { key_value = 7; }
+ 167   1          else if(COL2 == 0) { key_value = 8; }
+ 168   1          else if(COL3 == 0) { key_value = 9; }
+ 169   1          else if(COL4 == 0) { key_value = 0xFF; }
+ 170   1          if(key_value != 0xFF) goto found;
+ 171   1          
+ 172   1          // 扫描第2行 (P1.6) - 键位: 4,5,6,C(X键)
+ 173   1          ROW1 = 1; ROW2 = 0; ROW3 = 1; ROW4 = 1;
+ 174   1          delay_us(50);
+ 175   1          if(COL1 == 0) { key_value = 4; }
+ 176   1          else if(COL2 == 0) { key_value = 5; }
+ 177   1          else if(COL3 == 0) { key_value = 6; }
+ 178   1          else if(COL4 == 0) { key_value = KEY_CONFIRM; }
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 4   
+
+ 179   1          if(key_value != 0xFF) goto found;
+ 180   1          
+ 181   1          // 扫描第3行 (P1.5) - 键位: 1,2,3,B(-键)
+ 182   1          ROW1 = 1; ROW2 = 1; ROW3 = 0; ROW4 = 1;
+ 183   1          delay_us(50);
+ 184   1          if(COL1 == 0) { key_value = 1; }
+ 185   1          else if(COL2 == 0) { key_value = 2; }
+ 186   1          else if(COL3 == 0) { key_value = 3; }
+ 187   1          else if(COL4 == 0) { key_value = KEY_CLOSE; }
+ 188   1          if(key_value != 0xFF) goto found;
+ 189   1          
+ 190   1          // 扫描第4行 (P1.4) - 键位: ON/C,0,=,A(+键)
+ 191   1          ROW1 = 1; ROW2 = 1; ROW3 = 1; ROW4 = 0;
+ 192   1          delay_us(50);
+ 193   1          if(COL1 == 0) { key_value = KEY_CLEAR; }
+ 194   1          else if(COL2 == 0) { key_value = 0; }
+ 195   1          else if(COL3 == 0) { key_value = 0xFF; }
+ 196   1          else if(COL4 == 0) { key_value = KEY_MODIFY; }
+ 197   1          if(key_value != 0xFF) goto found;
+ 198   1          
+ 199   1          found:
+ 200   1          // 恢复所有行线
+ 201   1          ROW1 = 1; ROW2 = 1; ROW3 = 1; ROW4 = 1;
+ 202   1          
+ 203   1          if(key_value != 0xFF)
+ 204   1          {
+ 205   2              // 防抖延时
+ 206   2              delay_ms(30);
+ 207   2              
+ 208   2              // 等待按键完全释放（关键！防止重复触发）
+ 209   2              while(COL1 == 0 || COL2 == 0 || COL3 == 0 || COL4 == 0);
+ 210   2              
+ 211   2              // 额外延时确保完全释放
+ 212   2              delay_ms(50);
+ 213   2          }
+ 214   1          
+ 215   1          return key_value;
+ 216   1      }
+ 217          
+ 218          // 串口初始化 (9600bps, 11.0592MHz晶振)
+ 219          void Uart_Init()
+ 220          {
+ 221   1          TMOD |= 0x20;   // 定时器1模式2
+ 222   1          TH1 = 0xFD;     // 9600波特率
+ 223   1          TL1 = 0xFD;
+ 224   1          TR1 = 1;        // 启动定时器1
+ 225   1          SCON = 0x50;    // 模式1, 允许接收
+ 226   1          PCON = 0x00;    // SMOD=0
+ 227   1      }
+ 228          
+ 229          // 串口发送字节
+ 230          void Uart_Send(uchar dat)
+ 231          {
+ 232   1          SBUF = dat;
+ 233   1          while(!TI);
+ 234   1          TI = 0;
+ 235   1      }
+ 236          
+ 237          // 串口发送字符串
+ 238          void Uart_SendStr(uchar *str)
+ 239          {
+ 240   1          while(*str)
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 5   
+
+ 241   1          {
+ 242   2              Uart_Send(*str++);
+ 243   2          }
+ 244   1      }
+ 245          
+ 246          // 串口发送回车换行
+ 247          void Uart_SendCRLF()
+ 248          {
+ 249   1          Uart_Send(0x0D);  // 回车
+ 250   1          Uart_Send(0x0A);  // 换行
+ 251   1      }
+ 252          
+ 253          // 发送数字到串口
+ 254          void Uart_SendNum(uchar *num)
+ 255          {
+ 256   1          uchar i;
+ 257   1          for(i = 0; i < 4; i++)
+ 258   1          {
+ 259   2              Uart_Send(num[i] + '0');
+ 260   2          }
+ 261   1      }
+ 262          
+ 263          // 密码转数值（0-255）
+ 264          uint PwdToNum(uchar *p)
+ 265          {
+ 266   1          return (uint)(p[0]*1000 + p[1]*100 + p[2]*10 + p[3]);
+ 267   1      }
+ 268          
+ 269          // 检查密码是否在有效范围（0-255）
+ 270          bit CheckPwdRange(uchar *p)
+ 271          {
+ 272   1          uint num = PwdToNum(p);
+ 273   1          return (num <= 255);
+ 274   1      }
+ 275          
+ 276          // 验证密码（检查三个用户）
+ 277          bit CheckPwd(uchar *input, uchar *user_id)
+ 278          {
+ 279   1          uchar i, j;
+ 280   1          for(i = 0; i < 3; i++)
+ 281   1          {
+ 282   2              for(j = 0; j < 4; j++)
+ 283   2              {
+ 284   3                  if(input[j] != pwd_store[i][j])
+ 285   3                      break;
+ 286   3                  if(j == 3)
+ 287   3                  {
+ 288   4                      *user_id = i;
+ 289   4                      return 1;
+ 290   4                  }
+ 291   3              }
+ 292   2          }
+ 293   1          return 0;
+ 294   1      }
+ 295          
+ 296          // 正确动作
+ 297          // 继电器逻辑：RELAY=0吸合开锁，2秒后RELAY=1断开上锁
+ 298          // 在 Action_Ok() 函数中修改
+ 299          // 正确的 Action_Ok
+ 300          
+ 301          
+ 302          void Action_Ok()
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 6   
+
+ 303          {
+ 304   1          GREEN_LED = 0;
+ 305   1          RED_LED   = 1;
+ 306   1      
+ 307   1          // 强制输出高电平，驱动NPN导通、继电器吸合
+ 308   1          RELAY = 0;
+ 309   1          delay_ms(20);   // 给三极管/继电器足够响应时间
+ 310   1      
+ 311   1          LCD_Clear();
+ 312   1          LCD_Show(0, 0, "Unlock Success!");
+ 313   1          LCD_Show(0, 1, "Door Opened    ");
+ 314   1      
+ 315   1          Uart_SendStr("User ");
+ 316   1          Uart_Send(current_user + '1');
+ 317   1          Uart_SendStr(" Password OK -> Unlock");
+ 318   1          Uart_SendCRLF();
+ 319   1      
+ 320   1          delay_ms(2000); // 保持开锁2秒
+ 321   1      
+ 322   1          // 恢复上锁
+ 323   1          GREEN_LED = 1;
+ 324   1          RELAY = 1;
+ 325   1          delay_ms(20);
+ 326   1      
+ 327   1          err_cnt = 0;
+ 328   1      }
+ 329          
+ 330          
+ 331          // 错误动作
+ 332          // 继电器保持断开状态（上锁）
+ 333          void Action_Err()
+ 334          {
+ 335   1          RED_LED   = 0;   // 红灯亮
+ 336   1          GREEN_LED = 1;   // 绿灯灭
+ 337   1          RELAY     = 1;   // 继电器保持断开（上锁）
+ 338   1          err_cnt++;
+ 339   1          LCD_Clear();
+ 340   1          LCD_Show(0, 0, "Password Error!");
+ 341   1          LCD_Show(0, 1, "Count: ");
+ 342   1          LCD_Data(err_cnt + '0');
+ 343   1          LCD_Data('/');
+ 344   1          LCD_Data('3');
+ 345   1          
+ 346   1          Uart_SendStr("Password Error! Count: ");
+ 347   1          Uart_Send(err_cnt + '0');
+ 348   1          Uart_SendStr("/3");
+ 349   1          Uart_SendCRLF();
+ 350   1          
+ 351   1          delay_ms(1000);
+ 352   1          RED_LED = 1;     // 红灯灭
+ 353   1          
+ 354   1          if(err_cnt >= 3)
+ 355   1          {
+ 356   2              lock_flag = 1;
+ 357   2              LCD_Clear();
+ 358   2              LCD_Show(0, 0, "SYSTEM LOCKED!");
+ 359   2              LCD_Show(0, 1, "3 TIMES ERROR ");
+ 360   2              Uart_SendStr("SYSTEM LOCKED! Too many errors");
+ 361   2              Uart_SendCRLF();
+ 362   2          }
+ 363   1      }
+ 364          
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 7   
+
+ 365          // 初始化密码
+ 366          void InitPasswords()
+ 367          {
+ 368   1          uchar i, j;
+ 369   1          for(i = 0; i < 3; i++)
+ 370   1          {
+ 371   2              for(j = 0; j < 4; j++)
+ 372   2              {
+ 373   3                  pwd_store[i][j] = init_pwd[i][j];
+ 374   3              }
+ 375   2          }
+ 376   1      }
+ 377          
+ 378          // 主函数
+ 379          void main()
+ 380          {
+ 381   1          uchar key;
+ 382   1          uchar i;
+ 383   1          
+ 384   1          LCD_Init();
+ 385   1          Uart_Init();
+ 386   1          InitPasswords();
+ 387   1          
+ 388   1          // 初始化状态：继电器断开（上锁状态），灯灭
+ 389   1          GREEN_LED = 1;   // 绿灯灭
+ 390   1          RED_LED   = 1;   // 红灯灭
+ 391   1          RELAY     = 1;   // 继电器断开 = 上锁状态（默认）
+ 392   1          
+ 393   1          LCD_Show(0, 0, "Enter Password:");
+ 394   1          LCD_Show(0, 1, "                ");
+ 395   1          
+ 396   1          Uart_SendStr("Electronic Lock System Started");
+ 397   1          Uart_SendCRLF();
+ 398   1          Uart_SendStr("3 Users: 0001, 0002, 0003");
+ 399   1          Uart_SendCRLF();
+ 400   1          Uart_SendStr("Press X to confirm, - to reset, + to modify, ON/C to clear");
+ 401   1          Uart_SendCRLF();
+ 402   1          
+ 403   1              /*// 测试继电器和LED（开机时）
+ 404   1          GREEN_LED = 0;  // 绿灯亮
+ 405   1          RED_LED = 0;    // 红灯亮
+ 406   1          RELAY = 0;      // 继电器吸合
+ 407   1          delay_ms(2000); // 保持1秒
+ 408   1          
+ 409   1          GREEN_LED = 1;  // 绿灯灭
+ 410   1          RED_LED = 1;    // 红灯灭
+ 411   1          RELAY = 1;      // 继电器断开
+ 412   1          delay_ms(1000);
+ 413   1              */
+ 414   1              
+ 415   1          while(1)
+ 416   1          {
+ 417   2              key = KeyScan();
+ 418   2              if(key == 0xFF) 
+ 419   2              {
+ 420   3                  delay_ms(50);
+ 421   3                  continue;
+ 422   3              }
+ 423   2              
+ 424   2              // 系统锁定 - 按清除键(ON/C)复位
+ 425   2              if(lock_flag)
+ 426   2              {
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 8   
+
+ 427   3                  if(key == KEY_CLEAR)
+ 428   3                  {
+ 429   4                      lock_flag = 0;
+ 430   4                      err_cnt = 0;
+ 431   4                      input_cnt = 0;
+ 432   4                      LCD_Clear();
+ 433   4                      LCD_Show(0, 0, "Enter Password:");
+ 434   4                      LCD_Show(0, 1, "                ");
+ 435   4                      Uart_SendStr("System Reset");
+ 436   4                      Uart_SendCRLF();
+ 437   4                  }
+ 438   3                  continue;
+ 439   3              }
+ 440   2              
+ 441   2              // 修改键 '+' (KEY_MODIFY)
+ 442   2              if(key == KEY_MODIFY && !modify_flag)
+ 443   2              {
+ 444   3                  modify_flag = 1;
+ 445   3                  modify_step = 0;
+ 446   3                  input_cnt = 0;
+ 447   3                  LCD_Clear();
+ 448   3                  LCD_Show(0, 0, "Enter User(1-3):");
+ 449   3                  LCD_Show(0, 1, "                ");
+ 450   3                  Uart_SendStr("Modify Mode - Enter User ID (1-3)");
+ 451   3                  Uart_SendCRLF();
+ 452   3                  continue;
+ 453   3              }
+ 454   2              
+ 455   2              // 清除键 'ON/C' (KEY_CLEAR)
+ 456   2              if(key == KEY_CLEAR)
+ 457   2              {
+ 458   3                  input_cnt = 0;
+ 459   3                  LCD_Clear();
+ 460   3                  if(modify_flag)
+ 461   3                  {
+ 462   4                      if(modify_step == 0)
+ 463   4                      {
+ 464   5                          LCD_Show(0, 0, "Enter User(1-3):");
+ 465   5                          LCD_Show(0, 1, "                ");
+ 466   5                      }
+ 467   4                      else if(modify_step == 1)
+ 468   4                      {
+ 469   5                          LCD_Show(0, 0, "Enter Old PWD:");
+ 470   5                          LCD_Show(0, 1, "                ");
+ 471   5                      }
+ 472   4                      else
+ 473   4                      {
+ 474   5                          LCD_Show(0, 0, "Enter New PWD:");
+ 475   5                          LCD_Show(0, 1, "                ");
+ 476   5                      }
+ 477   4                  }
+ 478   3                  else
+ 479   3                  {
+ 480   4                      LCD_Show(0, 0, "Enter Password:");
+ 481   4                      LCD_Show(0, 1, "                ");
+ 482   4                  }
+ 483   3                  continue;
+ 484   3              }
+ 485   2              
+ 486   2              // 关闭键 '-' (KEY_CLOSE) - 复位所有状态
+ 487   2              if(key == KEY_CLOSE)
+ 488   2              {
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 9   
+
+ 489   3                  modify_flag = 0;
+ 490   3                  modify_step = 0;
+ 491   3                  input_cnt = 0;
+ 492   3                  err_cnt = 0;
+ 493   3                  LCD_Clear();
+ 494   3                  LCD_Show(0, 0, "Enter Password:");
+ 495   3                  LCD_Show(0, 1, "                ");
+ 496   3                  Uart_SendStr("System Reset by User");
+ 497   3                  Uart_SendCRLF();
+ 498   3                  continue;
+ 499   3              }
+ 500   2              
+ 501   2              // 数字键0-9
+ 502   2              if(key >= 0 && key <= 9 && input_cnt < 4)
+ 503   2              {
+ 504   3                  if(!modify_flag)
+ 505   3                  {
+ 506   4                      input_buf[input_cnt] = key;
+ 507   4                      // 直接显示输入的数字
+ 508   4                      LCD_ShowInput(0, 1, input_buf, input_cnt + 1);
+ 509   4                      input_cnt++;
+ 510   4                  }
+ 511   3                  else
+ 512   3                  {
+ 513   4                      if(modify_step == 0)
+ 514   4                      {
+ 515   5                          // 输入用户号(1-3)
+ 516   5                          if(input_cnt == 0 && key >= 1 && key <= 3)
+ 517   5                          {
+ 518   6                              modify_user = key - 1;
+ 519   6                              LCD_Data(key + '0');
+ 520   6                              input_cnt++;
+ 521   6                              modify_step = 1;
+ 522   6                              input_cnt = 0;
+ 523   6                              LCD_Clear();
+ 524   6                              LCD_Show(0, 0, "Enter Old PWD:");
+ 525   6                              LCD_Show(0, 1, "                ");
+ 526   6                              Uart_SendStr("Modify User ");
+ 527   6                              Uart_Send(modify_user + '1');
+ 528   6                              Uart_SendStr(" - Enter Old Password");
+ 529   6                              Uart_SendCRLF();
+ 530   6                          }
+ 531   5                          else if(input_cnt == 0 && (key < 1 || key > 3))
+ 532   5                          {
+ 533   6                              LCD_Clear();
+ 534   6                              LCD_Show(0, 0, "Invalid User!");
+ 535   6                              LCD_Show(0, 1, "Enter 1-3     ");
+ 536   6                              delay_ms(1000);
+ 537   6                              LCD_Clear();
+ 538   6                              LCD_Show(0, 0, "Enter User(1-3):");
+ 539   6                              LCD_Show(0, 1, "                ");
+ 540   6                          }
+ 541   5                      }
+ 542   4                      else if(modify_step == 1)
+ 543   4                      {
+ 544   5                          old_pwd[input_cnt] = key;
+ 545   5                          LCD_ShowInput(0, 1, old_pwd, input_cnt + 1);
+ 546   5                          input_cnt++;
+ 547   5                      }
+ 548   4                      else if(modify_step == 2)
+ 549   4                      {
+ 550   5                          new_pwd[input_cnt] = key;
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 10  
+
+ 551   5                          LCD_ShowInput(0, 1, new_pwd, input_cnt + 1);
+ 552   5                          input_cnt++;
+ 553   5                      }
+ 554   4                  }
+ 555   3              }
+ 556   2              
+ 557   2              // 确认键 'X' (KEY_CONFIRM)
+ 558   2              if(key == KEY_CONFIRM)
+ 559   2              {
+ 560   3                  if(!modify_flag)  // 普通验证模式
+ 561   3                  {
+ 562   4                      if(input_cnt == 4)
+ 563   4                      {
+ 564   5                          // 串口显示输入的密码
+ 565   5                          Uart_SendStr("Input Password: ");
+ 566   5                          Uart_SendNum(input_buf);
+ 567   5                          Uart_SendCRLF();
+ 568   5                          
+ 569   5                          if(CheckPwd(input_buf, &current_user))
+ 570   5                          {
+ 571   6                              Action_Ok();
+ 572   6                              LCD_Clear();
+ 573   6                              LCD_Show(0, 0, "Enter Password:");
+ 574   6                              LCD_Show(0, 1, "                ");
+ 575   6                          }
+ 576   5                          else
+ 577   5                          {
+ 578   6                              Action_Err();
+ 579   6                              if(!lock_flag)
+ 580   6                              {
+ 581   7                                  LCD_Clear();
+ 582   7                                  LCD_Show(0, 0, "Enter Password:");
+ 583   7                                  LCD_Show(0, 1, "                ");
+ 584   7                              }
+ 585   6                          }
+ 586   5                          input_cnt = 0;
+ 587   5                      }
+ 588   4                      else if(input_cnt > 0)
+ 589   4                      {
+ 590   5                          LCD_Clear();
+ 591   5                          LCD_Show(0, 0, "Need 4 digits!");
+ 592   5                          LCD_Show(0, 1, "                ");
+ 593   5                          delay_ms(1000);
+ 594   5                          LCD_Clear();
+ 595   5                          LCD_Show(0, 0, "Enter Password:");
+ 596   5                          LCD_Show(0, 1, "                ");
+ 597   5                          input_cnt = 0;
+ 598   5                      }
+ 599   4                  }
+ 600   3                  else  // 修改密码模式
+ 601   3                  {
+ 602   4                      if(modify_step == 1 && input_cnt == 4)  // 验证旧密码
+ 603   4                      {
+ 604   5                          Uart_SendStr("Old Password: ");
+ 605   5                          Uart_SendNum(old_pwd);
+ 606   5                          Uart_SendCRLF();
+ 607   5                          
+ 608   5                          if(CheckPwdRange(old_pwd))
+ 609   5                          {
+ 610   6                              uchar j;
+ 611   6                              bit pwd_correct = 0;
+ 612   6                              for(j = 0; j < 4; j++)
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 11  
+
+ 613   6                              {
+ 614   7                                  if(old_pwd[j] != pwd_store[modify_user][j])
+ 615   7                                      break;
+ 616   7                                  if(j == 3)
+ 617   7                                      pwd_correct = 1;
+ 618   7                              }
+ 619   6                              if(pwd_correct)
+ 620   6                              {
+ 621   7                                  modify_step = 2;
+ 622   7                                  input_cnt = 0;
+ 623   7                                  LCD_Clear();
+ 624   7                                  LCD_Show(0, 0, "Enter New PWD:");
+ 625   7                                  LCD_Show(0, 1, "                ");
+ 626   7                                  Uart_SendStr("Enter New Password (0000-0255)");
+ 627   7                                  Uart_SendCRLF();
+ 628   7                              }
+ 629   6                              else
+ 630   6                              {
+ 631   7                                  LCD_Clear();
+ 632   7                                  LCD_Show(0, 0, "Old PWD Error!");
+ 633   7                                  LCD_Show(0, 1, "                ");
+ 634   7                                  delay_ms(1000);
+ 635   7                                  modify_flag = 0;
+ 636   7                                  modify_step = 0;
+ 637   7                                  LCD_Clear();
+ 638   7                                  LCD_Show(0, 0, "Enter Password:");
+ 639   7                                  LCD_Show(0, 1, "                ");
+ 640   7                                  Uart_SendStr("Old Password Error!");
+ 641   7                                  Uart_SendCRLF();
+ 642   7                              }
+ 643   6                          }
+ 644   5                          else
+ 645   5                          {
+ 646   6                              LCD_Clear();
+ 647   6                              LCD_Show(0, 0, "Invalid Range!");
+ 648   6                              LCD_Show(0, 1, "0000-0255 Only");
+ 649   6                              delay_ms(1000);
+ 650   6                              modify_flag = 0;
+ 651   6                              modify_step = 0;
+ 652   6                              LCD_Clear();
+ 653   6                              LCD_Show(0, 0, "Enter Password:");
+ 654   6                              LCD_Show(0, 1, "                ");
+ 655   6                              Uart_SendStr("Password out of range (0-255)!");
+ 656   6                              Uart_SendCRLF();
+ 657   6                          }
+ 658   5                          input_cnt = 0;
+ 659   5                      }
+ 660   4                      else if(modify_step == 2 && input_cnt == 4)  // 设置新密码
+ 661   4                      {
+ 662   5                          Uart_SendStr("New Password: ");
+ 663   5                          Uart_SendNum(new_pwd);
+ 664   5                          Uart_SendCRLF();
+ 665   5                          
+ 666   5                          if(CheckPwdRange(new_pwd))
+ 667   5                          {
+ 668   6                              for(i = 0; i < 4; i++)
+ 669   6                              {
+ 670   7                                  pwd_store[modify_user][i] = new_pwd[i];
+ 671   7                              }
+ 672   6                              LCD_Clear();
+ 673   6                              LCD_Show(0, 0, "Modify Success!");
+ 674   6                              LCD_Show(0, 1, "                ");
+C51 COMPILER V9.60.7.0   MAIN                                                              05/29/2026 17:25:37 PAGE 12  
+
+ 675   6                              Uart_SendStr("User ");
+ 676   6                              Uart_Send(modify_user + '1');
+ 677   6                              Uart_SendStr(" Password Modified to ");
+ 678   6                              Uart_SendNum(new_pwd);
+ 679   6                              Uart_SendCRLF();
+ 680   6                              delay_ms(1500);
+ 681   6                          }
+ 682   5                          else
+ 683   5                          {
+ 684   6                              LCD_Clear();
+ 685   6                              LCD_Show(0, 0, "Invalid Range!");
+ 686   6                              LCD_Show(0, 1, "0000-0255 Only");
+ 687   6                              Uart_SendStr("New Password out of range (0-255)!");
+ 688   6                              Uart_SendCRLF();
+ 689   6                              delay_ms(1000);
+ 690   6                          }
+ 691   5                          modify_flag = 0;
+ 692   5                          modify_step = 0;
+ 693   5                          LCD_Clear();
+ 694   5                          LCD_Show(0, 0, "Enter Password:");
+ 695   5                          LCD_Show(0, 1, "                ");
+ 696   5                          input_cnt = 0;
+ 697   5                      }
+ 698   4                      else if(input_cnt != 4 && input_cnt > 0)
+ 699   4                      {
+ 700   5                          LCD_Clear();
+ 701   5                          LCD_Show(0, 0, "Need 4 digits!");
+ 702   5                          LCD_Show(0, 1, "                ");
+ 703   5                          delay_ms(1000);
+ 704   5                          LCD_Clear();
+ 705   5                          if(modify_step == 1)
+ 706   5                          {
+ 707   6                              LCD_Show(0, 0, "Enter Old PWD:");
+ 708   6                              LCD_Show(0, 1, "                ");
+ 709   6                          }
+ 710   5                          else if(modify_step == 2)
+ 711   5                          {
+ 712   6                              LCD_Show(0, 0, "Enter New PWD:");
+ 713   6                              LCD_Show(0, 1, "                ");
+ 714   6                          }
+ 715   5                          input_cnt = 0;
+ 716   5                      }
+ 717   4                  }
+ 718   3              }
+ 719   2              
+ 720   2              delay_ms(100);
+ 721   2          }
+ 722   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   2224    ----
+   CONSTANT SIZE    =    776    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     29      26
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      2       1
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
